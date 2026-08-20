@@ -4,7 +4,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import _core
+from ._core import encode as _encode
 
 _SUPPORTED_DTYPES = (np.dtype(np.uint32), np.dtype(np.uint64))
 
@@ -31,5 +31,5 @@ def encode(labels: np.ndarray) -> EncodedLabels:
     if labels.ndim != 2:
         raise ValueError("labels must be a 2D array")
 
-    ids, counts = _core.encode(np.ascontiguousarray(labels))
+    ids, counts = _encode(np.ascontiguousarray(labels))
     return EncodedLabels(ids, counts)
