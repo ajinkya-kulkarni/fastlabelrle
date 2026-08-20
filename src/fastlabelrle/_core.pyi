@@ -1,0 +1,4 @@
+import numpy as np
+
+
+def encode(labels: np.ndarray) -> tuple[np.ndarray, list[bytes]]: ...
