@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastlabelrle"
-version = "0.0.1"
+version = "0.1.0"
 description = "Fast direct COCO RLE encoding for integer instance-label images"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,6 +17,7 @@ Issues = "https://github.com/ajinkya-kulkarni/fastlabelrle/issues"
 
 [dependency-groups]
 dev = [
+    "build>=1.2",
     "mypy>=1.15",
     "pytest>=8.3",
     "ruff>=0.11",
