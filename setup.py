@@ -21,7 +21,7 @@ ext_modules = [
 setup(
     package_dir={"": "src"},
     packages=["fastlabelrle"],
-    package_data={"fastlabelrle": ["py.typed"]},
+    package_data={"fastlabelrle": ["*.pyi", "py.typed"]},
     ext_modules=ext_modules,
     zip_safe=False,
 )
