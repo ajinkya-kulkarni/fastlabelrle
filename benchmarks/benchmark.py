@@ -61,6 +61,39 @@ def bench_fastlabelrle(labels: np.ndarray) -> Any:
     return fastlabelrle.encode(labels)
 
 
+def _make_fortran_binary(labels: np.ndarray, label: np.integer[Any]) -> np.ndarray:
+    """Build one uint8 binary mask directly in Fortran order."""
+    binary = np.empty(labels.shape, dtype=np.uint8, order="F")
+    np.equal(labels, label, out=binary)
+    return binary
+
+
+def _make_fortran_batch(labels: np.ndarray, ids: np.ndarray) -> np.ndarray:
+    """Build an HxWxN uint8 mask stack directly in Fortran order."""
+    batch = np.empty((*labels.shape, len(ids)), dtype=np.uint8, order="F")
+    for index, label in enumerate(ids):
+        np.equal(labels, label, out=batch[:, :, index])
+    return batch
+
+
+def _encode_in_batches(
+    labels: np.ndarray,
+    ids: np.ndarray,
+    batch_size: int,
+    encode: Callable[[np.ndarray], Any],
+) -> list[Any]:
+    out: list[Any] = []
+    for start in range(0, len(ids), batch_size):
+        chunk_ids = ids[start : start + batch_size]
+        binary = _make_fortran_batch(labels, chunk_ids)
+        encoded = encode(binary)
+        if isinstance(encoded, list):
+            out.extend(encoded)
+        else:
+            out.append(encoded)
+    return out
+
+
 def make_pycocotools(labels: np.ndarray, ids: np.ndarray) -> Callable[[], Any] | None:
     try:
         from pycocotools import mask as mask_utils
@@ -70,9 +103,24 @@ def make_pycocotools(labels: np.ndarray, ids: np.ndarray) -> Callable[[], Any] |
     def run() -> list[dict[str, Any]]:
         out = []
         for label in ids:
-            binary = np.asfortranarray(labels == label, dtype=np.uint8)
-            out.append(mask_utils.encode(binary))
+            out.append(mask_utils.encode(_make_fortran_binary(labels, label)))
         return out
+
+    return run
+
+
+def make_pycocotools_batched(
+    labels: np.ndarray,
+    ids: np.ndarray,
+    batch_size: int,
+) -> Callable[[], Any] | None:
+    try:
+        from pycocotools import mask as mask_utils
+    except ImportError:
+        return None
+
+    def run() -> list[Any]:
+        return _encode_in_batches(labels, ids, batch_size, mask_utils.encode)
 
     return run
 
@@ -102,11 +150,39 @@ def make_hotcoco(labels: np.ndarray, ids: np.ndarray) -> Callable[[], Any] | Non
     def run() -> list[dict[str, Any]]:
         out = []
         for label in ids:
-            binary = np.asarray(labels == label, dtype=np.uint8)
-            out.append(mask_utils.encode(binary))
+            out.append(mask_utils.encode(_make_fortran_binary(labels, label)))
         return out
 
     return run
+
+
+def make_hotcoco_batched(
+    labels: np.ndarray,
+    ids: np.ndarray,
+    batch_size: int,
+) -> Callable[[], Any] | None:
+    try:
+        from hotcoco import mask as mask_utils
+    except ImportError:
+        return None
+
+    def run() -> list[Any]:
+        return _encode_in_batches(labels, ids, batch_size, mask_utils.encode)
+
+    return run
+
+
+def _parse_batch_sizes(value: str) -> list[int]:
+    if not value:
+        return []
+
+    sizes: list[int] = []
+    for item in value.split(","):
+        size = int(item.strip())
+        if size < 1:
+            raise argparse.ArgumentTypeError("batch sizes must be positive")
+        sizes.append(size)
+    return sizes
 
 
 def main() -> None:
@@ -116,6 +192,18 @@ def main() -> None:
     parser.add_argument("--size", type=int, default=1024)
     parser.add_argument("--instances", type=int, default=1024)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--batch-sizes",
+        type=_parse_batch_sizes,
+        default=[8, 32, 128],
+        help="comma-separated binary-mask batch sizes for pycocotools/hotcoco",
+    )
+    parser.add_argument(
+        "--max-batch-mib",
+        type=float,
+        default=512.0,
+        help="skip a batched baseline if its temporary HxWxN uint8 stack exceeds this size",
+    )
     args = parser.parse_args()
 
     labels = make_nuclei_mask(args.size, args.instances)
@@ -129,19 +217,37 @@ def main() -> None:
         ("hotcoco", make_hotcoco(labels, ids)),
     ]
 
+    batch_notes: dict[str, float] = {}
+    for batch_size in args.batch_sizes:
+        batch_mib = labels.shape[0] * labels.shape[1] * batch_size / 1024**2
+        if batch_mib > args.max_batch_mib:
+            continue
+
+        py_name = f"pycoco[b={batch_size}]"
+        hot_name = f"hotcoco[b={batch_size}]"
+        methods.append((py_name, make_pycocotools_batched(labels, ids, batch_size)))
+        methods.append((hot_name, make_hotcoco_batched(labels, ids, batch_size)))
+        batch_notes[py_name] = batch_mib
+        batch_notes[hot_name] = batch_mib
+
     print(f"shape: {labels.shape[0]}x{labels.shape[1]}")
     print(f"instances: {len(ids)}")
     print(f"input: {labels.nbytes / 1024**2:.2f} MiB uint32")
+    if batch_notes:
+        max_batch = max(batch_notes.values())
+        print(f"largest temporary binary batch: {max_batch:.2f} MiB")
     print()
 
     timings: dict[str, float] = {}
     for name, fn in methods:
         if fn is None:
-            print(f"{name:14s} not installed")
+            print(f"{name:18s} not installed")
             continue
         seconds = time_call(fn, args.repeats)
         timings[name] = seconds
-        print(f"{name:14s} {seconds:10.6f} s")
+        batch_mib = batch_notes.get(name)
+        note = "" if batch_mib is None else f"  ({batch_mib:.1f} MiB binary batch)"
+        print(f"{name:18s} {seconds:10.6f} s{note}")
 
     direct = timings.get("fastlabelrle")
     if direct is not None:
@@ -149,7 +255,7 @@ def main() -> None:
         for name, seconds in timings.items():
             if name == "fastlabelrle":
                 continue
-            print(f"speedup vs {name:12s}: {seconds / direct:8.1f}x")
+            print(f"speedup vs {name:16s}: {seconds / direct:8.1f}x")
 
 
 if __name__ == "__main__":
